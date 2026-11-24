@@ -8,6 +8,9 @@ camera, so you read your script while looking into the lens.
   typing, scrolling and clicking in your browser while you read.
 - Each sentence comes with a cue, in blue, for what to show on screen while
   you say it.
+- Scripts are plain Markdown tables, easy to write by hand or to ask **an AI
+  agent** for: save one to `~/Prompteur/script.md` and the band shows it,
+  and every later edit, within a second.
 - It stays **out of your screenshots and screen recordings** by default, and
   one shortcut puts it in the picture when you want to show it.
 
@@ -100,16 +103,46 @@ a table under it is one sentence: what you say, then what you show.
 
 ### Loading a script
 
-- **From the menu bar icon**: *Open Script…* picks a `.md` or `.json` file.
-  Prompteur remembers it and opens it again at the next launch. *Reload
-  Script* (⌘R while the menu is open) reads it again after you edit it, and
-  *Use Built-in Script* goes back to the one built into the app.
+- **Write it to `~/Prompteur/script.md`** (the folder `Prompteur` in your
+  home folder; `script.json` works too). Prompteur watches that file: as soon
+  as it is saved, the band switches to it, and every later save shows up
+  within a second, without losing your place. This is the easiest way, and
+  the one to give an AI agent.
+- **From the menu bar icon**: *Open Script…* picks a `.md` or `.json` file
+  anywhere. Prompteur remembers it, opens it again at the next launch and
+  reloads it when it changes. *Use Built-in Script* goes back to the one
+  built into the app.
 - **Built into the app**: `sh build.sh path/to/script.md`.
 - **From the command line**, for one launch:
 
   ```sh
   build/Prompteur.app/Contents/MacOS/Prompteur --script path/to/script.md
   ```
+
+At launch, Prompteur opens the last script you chose from the menu, then
+`~/Prompteur/script.md`, then the built-in one. When a script is edited, the
+band stays on the section it was showing, found by its title, and a file
+caught half written leaves the previous version on screen until the next
+save.
+
+### Writing a script with an AI agent
+
+Any AI agent that can write files (Claude Code, Cursor, Codex…) can write the
+script for you. Paste something like this, with your own subject:
+
+```text
+Write a teleprompter script for a 2-minute demo video of <your product> to
+~/Prompteur/script.md, in this format: one "## Section title · what is on
+screen" heading per part of the video, and under each heading a two-column
+Markdown table with the header "| Say | Show |". Each row is one short
+sentence I will say, then what I should show on screen while I say it. Keep
+sentences under 20 words, spoken English. Start a row with "!" for a line
+I must not forget.
+```
+
+The band picks the script up as soon as the file is written. Ask the agent
+for changes ("make the intro shorter", "add a section on pricing") and they
+appear on the band as it saves them, while you keep your place.
 
 ### JSON
 

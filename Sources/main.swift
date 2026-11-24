@@ -156,6 +156,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     var capturable = false
     var notice: String?
+    var noticeAlert = false
     var noticeTimer: Timer?
     var lastToggle = Date.distantPast
 
@@ -174,6 +175,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         watchOption()
 
         load(initialScript())
+        watchScripts()
         if let n = arg("--section").flatMap(Int.init), !sections.isEmpty {
             s = min(max(n - 1, 0), sections.count - 1)
         } else if defaults.integer(forKey: "section") < sections.count {
@@ -206,19 +208,39 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             .first { FileManager.default.fileExists(atPath: $0.path) }
     }
 
+    // ~/Prompteur/script.md (or .json): a place anybody, an AI agent
+    // included, can write a script to without knowing where the app is. Not
+    // ~/Documents, which macOS guards behind a permission prompt.
+    static let inboxFolder = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Prompteur")
+
+    func inboxScript() -> URL? {
+        ["script.md", "script.json"].map { App.inboxFolder.appendingPathComponent($0) }
+            .filter { FileManager.default.fileExists(atPath: $0.path) }
+            .max { (modified($0) ?? .distantPast) < (modified($1) ?? .distantPast) }
+    }
+
+    func modified(_ url: URL) -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+    }
+
+    // What the user chose last wins: a file opened from the menu, or the
+    // built-in script ("builtin"). Then the inbox, then the built-in one.
     func initialScript() -> URL? {
         if let path = arg("--script") { return URL(fileURLWithPath: path) }
-        if let path = defaults.string(forKey: "scriptPath"), FileManager.default.fileExists(atPath: path) {
-            return URL(fileURLWithPath: path)
+        let saved = defaults.string(forKey: "scriptPath")
+        if saved == "builtin", let bundled = bundledScript() { return bundled }
+        if let saved, saved != "builtin", FileManager.default.fileExists(atPath: saved) {
+            return URL(fileURLWithPath: saved)
         }
-        return bundledScript()
+        return inboxScript() ?? bundledScript()
     }
 
     func load(_ url: URL?) {
         source = url
+        sourceSeen = url.flatMap(modified)
         guard let url else {
             sections = []
-            problem = "No script loaded. Open one from the menu bar icon."
+            problem = "No script loaded. Open one from the menu bar icon, or write ~/Prompteur/script.md."
             return
         }
         do {
@@ -230,6 +252,68 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         s = min(s, max(sections.count - 1, 0))
         l = sections.isEmpty ? 0 : min(l, sections[s].lines.count - 1)
+    }
+
+    // Reads the script again after an edit. The place is kept by section
+    // title, so a section added above the current one does not move it; and
+    // a file caught half written keeps the old script on screen rather than
+    // an error, since the next save will be read in turn.
+    func refresh(_ url: URL, keepPlace: Bool, announce: String) {
+        sourceSeen = modified(url)
+        do {
+            let fresh = try Script.load(url)
+            let title = sections.indices.contains(s) ? sections[s].title : nil
+            sections = fresh
+            source = url
+            problem = nil
+            if keepPlace {
+                if let title, let i = fresh.firstIndex(where: { $0.title == title }) { s = i }
+                s = min(s, fresh.count - 1)
+                l = min(l, fresh[s].lines.count - 1)
+            } else {
+                s = 0
+                l = 0
+            }
+            flash(announce)
+        } catch {
+            if sections.isEmpty {
+                source = url
+                problem = "Could not read the script: \(error.localizedDescription)"
+                render()
+            } else {
+                flash("Could not read \(url.lastPathComponent): \(error.localizedDescription)", alert: true)
+            }
+        }
+    }
+
+    // Once a second, the modification dates of the script on screen and of
+    // the inbox. A timer rather than a file watcher: editors and agents save
+    // by writing a new file and renaming it over the old one, which a watcher
+    // on the old file never sees.
+    var sourceSeen: Date?
+    var inboxSeen: Date?
+
+    func watchScripts() {
+        inboxSeen = inboxScript().flatMap(modified)
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in self?.checkScripts() }
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    func checkScripts() {
+        if let inbox = inboxScript(), let date = modified(inbox), date != inboxSeen {
+            inboxSeen = date
+            if inbox == source {
+                refresh(inbox, keepPlace: true, announce: "Script updated")
+            } else {
+                // A new script in the inbox is somebody asking for it to be read.
+                defaults.removeObject(forKey: "scriptPath")
+                refresh(inbox, keepPlace: false, announce: "Script loaded from ~/Prompteur")
+            }
+            return
+        }
+        if let source, let date = modified(source), date != sourceSeen {
+            refresh(source, keepPlace: true, announce: "Script updated")
+        }
     }
 
     @objc func openScript() {
@@ -246,16 +330,21 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc func reloadScript() {
-        load(source)
-        render()
+        guard let source else { return }
+        refresh(source, keepPlace: true, announce: "Script reloaded")
     }
 
     @objc func useBundledScript() {
-        defaults.removeObject(forKey: "scriptPath")
+        defaults.set("builtin", forKey: "scriptPath")
         s = 0
         l = 0
         load(bundledScript())
         render()
+    }
+
+    @objc func revealScript() {
+        guard let source else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([source])
     }
 
     // --- The band ---
@@ -365,7 +454,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         meta.textColor = NSColor(white: 0.55, alpha: 1)
         if let notice {
             meta.stringValue = notice
-            meta.textColor = capturable ? NSColor(red: 1, green: 0.27, blue: 0.23, alpha: 1) : NSColor(white: 0.85, alpha: 1)
+            meta.textColor = noticeAlert ? NSColor(red: 1, green: 0.27, blue: 0.23, alpha: 1) : NSColor(white: 0.85, alpha: 1)
         }
         say.stringValue = text
         say.textColor = color
@@ -433,11 +522,12 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         capturable.toggle()
         defaults.set(capturable, forKey: "visibleInCaptures")
         applyCapture()
-        flash(capturable ? "● Visible in screenshots and recordings" : "Hidden from screenshots and recordings")
+        flash(capturable ? "● Visible in screenshots and recordings" : "Hidden from screenshots and recordings", alert: capturable)
     }
 
-    func flash(_ text: String) {
+    func flash(_ text: String, alert: Bool = false) {
         notice = text
+        noticeAlert = alert
         noticeTimer?.invalidate()
         noticeTimer = Timer.scheduledTimer(withTimeInterval: 2.5, repeats: false) { [weak self] _ in
             self?.notice = nil
@@ -490,12 +580,16 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         add("Open Script…", #selector(openScript), key: "o", mods: .command)
         let reload = add("Reload Script", #selector(reloadScript), key: "r", mods: .command)
         reload.isEnabled = source != nil
-        if let source, source != bundledScript(), bundledScript() != nil {
+        let bundled = bundledScript()
+        if let bundled, source != bundled {
             add("Use Built-in Script", #selector(useBundledScript))
         }
         if let source {
-            let current = add("Script: \(source.lastPathComponent)", nil)
-            current.isEnabled = false
+            // The file on screen, shown where it can be found again.
+            let name = source == bundled ? "built-in"
+                : (source.path as NSString).abbreviatingWithTildeInPath
+            let current = add("Script: \(name)", source == bundled ? nil : #selector(revealScript))
+            current.toolTip = "Show in Finder"
         }
         menu.addItem(.separator())
         add("Quit Prompteur", #selector(NSApplication.terminate(_:)), key: "q", mods: .option).target = NSApp
