@@ -109,8 +109,10 @@ a table under it is one sentence: what you say, then what you show.
   as it is saved, the band switches to it, and every later save shows up
   within a second, without losing your place. This is the easiest way, and
   the one to give an AI agent. *Create ~/Prompteur/script.md* in the menu
-  writes a starter script there and opens it in your editor; once it exists,
-  the same item reads *Edit ~/Prompteur/script.md*.
+  writes a starter script there and opens it in the app you open Markdown
+  with, or in your default text editor if that app is Xcode (which claims
+  `.md` files on any Mac it is installed on). Once the file exists, the same
+  item reads *Edit ~/Prompteur/script.md*.
 - **From the menu bar icon**: *Open Script…* picks a `.md` or `.json` file
   anywhere. Prompteur remembers it, opens it again at the next launch and
   reloads it when it changes. *Use Built-in Script* goes back to the one

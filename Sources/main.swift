@@ -466,11 +466,17 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 return
             }
         }
-        // No app may be set to open Markdown files; TextEdit always is there.
-        if !NSWorkspace.shared.open(file) {
-            NSWorkspace.shared.open([file], withApplicationAt: URL(fileURLWithPath: "/System/Applications/TextEdit.app"),
-                                    configuration: NSWorkspace.OpenConfiguration())
-        }
+        NSWorkspace.shared.open([file], withApplicationAt: editor(for: file), configuration: NSWorkspace.OpenConfiguration())
+    }
+
+    // The app set to open Markdown, unless it is Xcode: installing Xcode
+    // makes it the owner of .md on any Mac where nothing else claimed it, and
+    // a whole IDE is a strange place to write four sentences. Then, as with
+    // none at all, the default text editor (TextEdit, or whatever replaced it).
+    func editor(for file: URL) -> URL {
+        let workspace = NSWorkspace.shared
+        if let app = workspace.urlForApplication(toOpen: file), app.lastPathComponent != "Xcode.app" { return app }
+        return workspace.urlForApplication(toOpen: .plainText) ?? URL(fileURLWithPath: "/System/Applications/TextEdit.app")
     }
 
     @objc func revealScript() {
