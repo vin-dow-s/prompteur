@@ -46,23 +46,64 @@ struct Section: Decodable {
     enum CodingKeys: String, CodingKey { case title, subtitle, lines }
 }
 
+// What went wrong, for the white line of the band, and what to do about it,
+// for the blue one under it.
 struct ScriptError: LocalizedError {
+    static let fixIt = "Fix the file and save it: the band reads it again"
+    static let chooseOne = "Menu bar icon → Create ~/Prompteur/script.md, or Open Script…"
     let errorDescription: String?
-    init(_ message: String) { errorDescription = message }
+    let hint: String
+    init(_ message: String, hint: String = ScriptError.fixIt) {
+        errorDescription = message
+        self.hint = hint
+    }
 }
 
 enum Script {
     static func load(_ url: URL) throws -> [Section] {
-        let data = try Data(contentsOf: url)
+        guard let data = try? Data(contentsOf: url) else {
+            throw FileManager.default.fileExists(atPath: url.path)
+                ? ScriptError("\(url.lastPathComponent) could not be opened")
+                : ScriptError("\(url.lastPathComponent) was not found", hint: ScriptError.chooseOne)
+        }
         let sections: [Section]
         if url.pathExtension.lowercased() == "json" {
-            sections = try JSONDecoder().decode([Section].self, from: data)
+            do {
+                sections = try JSONDecoder().decode([Section].self, from: data)
+            } catch let error as DecodingError {
+                throw ScriptError("\(url.lastPathComponent) is not a Prompteur script: \(describe(error))")
+            }
         } else {
             sections = markdown(String(decoding: data, as: UTF8.self))
         }
         let kept = sections.filter { !$0.lines.isEmpty }
-        if kept.isEmpty { throw ScriptError("no sentence found in \(url.lastPathComponent)") }
+        if kept.isEmpty {
+            throw ScriptError("\(url.lastPathComponent) has no sentence yet",
+                              hint: "Write each sentence as a table row: | what you say | what you show |")
+        }
         return kept
+    }
+
+    // JSONDecoder's own message ("isn't in the correct format") names
+    // neither the field nor the place, which is all anybody needs to fix it.
+    static func describe(_ error: DecodingError) -> String {
+        // [0, "lines", 2] reads "in section 1, line 3".
+        func place(_ path: [CodingKey]) -> String {
+            var words: [String] = []
+            for (i, key) in path.enumerated() {
+                guard let n = key.intValue else { continue }
+                words.append(i > 0 && path[i - 1].stringValue == "lines" ? "line \(n + 1)" : "section \(n + 1)")
+            }
+            return words.isEmpty ? "" : " in " + words.joined(separator: ", ")
+        }
+        switch error {
+        case .keyNotFound(let key, let c): return "\"\(key.stringValue)\" is missing\(place(c.codingPath))"
+        case .typeMismatch(_, let c) where c.codingPath.isEmpty:
+            return "it should be a list of sections, [ { \"title\": …, \"lines\": [ … ] } ]"
+        case .typeMismatch(_, let c), .valueNotFound(_, let c): return "wrong value\(place(c.codingPath))"
+        case .dataCorrupted(let c): return c.codingPath.isEmpty ? "invalid JSON" : "invalid value\(place(c.codingPath))"
+        @unknown default: return "invalid JSON"
+        }
     }
 
     // A heading opens a section ("Title · subtitle"), and every row of a
@@ -70,10 +111,13 @@ enum Script {
     // else in the file is left alone, so a script can carry its own notes.
     static func markdown(_ text: String) -> [Section] {
         var sections: [Section] = []
-        let rows = text.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }
+        // Windows line endings and a byte order mark are what a script saved
+        // by another editor brings; either would hide a heading or a header.
+        let normalized = text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+            .replacingOccurrences(of: "\u{FEFF}", with: "")
+        let rows = normalized.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
         for (i, row) in rows.enumerated() {
-            if row.hasPrefix("#") {
-                let heading = String(row.drop { $0 == "#" }).trimmingCharacters(in: .whitespaces)
+            if let heading = heading(row) {
                 let parts = heading.components(separatedBy: " · ")
                 sections.append(Section(title: parts[0], subtitle: parts.dropFirst().joined(separator: " · ")))
                 continue
@@ -96,13 +140,32 @@ enum Script {
         return sections
     }
 
+    // "## Title", one to six hashes and a space, as Markdown has it: "#tag"
+    // at the start of a note is not a heading.
+    static func heading(_ row: String) -> String? {
+        let hashes = row.prefix { $0 == "#" }.count
+        guard (1...6).contains(hashes) else { return nil }
+        let rest = row.dropFirst(hashes)
+        guard rest.isEmpty || rest.first == " " else { return nil }
+        return rest.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "#")).trimmingCharacters(in: .whitespaces)
+    }
+
     static func cells(_ row: String) -> [String] {
-        var inner = Substring(row)
+        // "\|" is a pipe inside a cell, not a column.
+        let pipe = "\u{E000}"
+        var inner = Substring(row.replacingOccurrences(of: "\\|", with: pipe))
         if inner.hasPrefix("|") { inner = inner.dropFirst() }
         if inner.hasSuffix("|") { inner = inner.dropLast() }
-        return inner.components(separatedBy: "|").map {
-            $0.replacingOccurrences(of: "**", with: "").trimmingCharacters(in: .whitespaces)
-        }
+        return inner.components(separatedBy: "|").map { plain($0.replacingOccurrences(of: pipe, with: "|")) }
+    }
+
+    // Markdown inside a cell is shown as the text it stands for: bold and
+    // code marks dropped, a link reduced to its words.
+    static func plain(_ cell: String) -> String {
+        var s = cell.replacingOccurrences(of: "**", with: "").replacingOccurrences(of: "__", with: "")
+            .replacingOccurrences(of: "`", with: "").replacingOccurrences(of: "<br>", with: " ")
+        s = s.replacingOccurrences(of: #"\[([^\]]*)\]\([^)]*\)"#, with: "$1", options: .regularExpression)
+        return s.trimmingCharacters(in: .whitespaces)
     }
 
     static func isRule(_ row: String) -> Bool {
@@ -144,6 +207,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var l = 0
     var source: URL?
     var problem: String?
+    var problemHint = ""
     var panel: Panel!
     var statusItem: NSStatusItem!
     let menu = NSMenu()
@@ -240,7 +304,8 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         sourceSeen = url.flatMap(modified)
         guard let url else {
             sections = []
-            problem = "No script loaded. Open one from the menu bar icon, or write ~/Prompteur/script.md."
+            problem = "No script yet"
+            problemHint = ScriptError.chooseOne
             return
         }
         do {
@@ -248,7 +313,8 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             problem = nil
         } catch {
             sections = []
-            problem = "Could not read the script: \(error.localizedDescription)"
+            problem = error.localizedDescription
+            problemHint = (error as? ScriptError)?.hint ?? ScriptError.fixIt
         }
         s = min(s, max(sections.count - 1, 0))
         l = sections.isEmpty ? 0 : min(l, sections[s].lines.count - 1)
@@ -276,12 +342,17 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             flash(announce)
         } catch {
+            if !FileManager.default.fileExists(atPath: url.path) {
+                if !sections.isEmpty { flash("\(url.lastPathComponent) was deleted: the band keeps its last version", alert: true) }
+                return
+            }
             if sections.isEmpty {
                 source = url
-                problem = "Could not read the script: \(error.localizedDescription)"
+                problem = error.localizedDescription
+            problemHint = (error as? ScriptError)?.hint ?? ScriptError.fixIt
                 render()
             } else {
-                flash("Could not read \(url.lastPathComponent): \(error.localizedDescription)", alert: true)
+                flash(error.localizedDescription, alert: true)
             }
         }
     }
@@ -311,27 +382,48 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             return
         }
-        if let source, let date = modified(source), date != sourceSeen {
+        if let source, modified(source) != sourceSeen {
             refresh(source, keepPlace: true, announce: "Script updated")
         }
     }
 
+    var openDialog: NSOpenPanel?
+
+    // Modeless, not runModal: a modal dialog froze the band (no drag, no
+    // cross) for as long as it was open, and when it opened behind a
+    // full-screen app nobody could see it to close it.
     @objc func openScript() {
-        NSApp.activate(ignoringOtherApps: true)
+        if let openDialog {
+            NSApp.activate(ignoringOtherApps: true)
+            openDialog.makeKeyAndOrderFront(nil)
+            return
+        }
+        let previous = NSWorkspace.shared.frontmostApplication
         let dialog = NSOpenPanel()
         dialog.message = "Choose a script (Markdown or JSON)"
+        dialog.prompt = "Open Script"
         dialog.allowedContentTypes = [.json, .plainText] + ["md", "markdown"].compactMap { UTType(filenameExtension: $0) }
-        guard dialog.runModal() == .OK, let url = dialog.url else { return }
-        defaults.set(url.path, forKey: "scriptPath")
-        s = 0
-        l = 0
-        load(url)
-        render()
-    }
-
-    @objc func reloadScript() {
-        guard let source else { return }
-        refresh(source, keepPlace: true, announce: "Script reloaded")
+        if let source, source != bundledScript() { dialog.directoryURL = source.deletingLastPathComponent() }
+        // Above the band, on the Space in use, a full-screen app's included.
+        dialog.level = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 1)
+        dialog.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+        openDialog = dialog
+        NSApp.activate(ignoringOtherApps: true)
+        dialog.begin { [weak self] response in
+            guard let self else { return }
+            self.openDialog = nil
+            if response == .OK, let url = dialog.url {
+                self.defaults.set(url.path, forKey: "scriptPath")
+                self.s = 0
+                self.l = 0
+                self.load(url)
+                self.render()
+            }
+            // The keyboard goes back to the app being shown, as it was.
+            if let previous, previous != NSRunningApplication.current {
+                previous.activate()
+            }
+        }
     }
 
     @objc func useBundledScript() {
@@ -340,6 +432,45 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         l = 0
         load(bundledScript())
         render()
+    }
+
+    static let starter = """
+    # My script
+
+    Each heading is a part of the video, and each row of a table under it is
+    one sentence: what you say on the left, what you show on the right. Save
+    this file and the band shows it. Anything outside the tables, like this
+    paragraph, is ignored.
+
+    ## Intro · home page
+
+    | Say | Show |
+    |---|---|
+    | Hi, I'm going to show you something I built. | Open the home page |
+    | It takes one minute. | Point at the main button |
+    | ! A sentence starting with an exclamation mark is shown in yellow. | |
+
+    """
+
+    // The inbox made for somebody who has never seen the format: a starter
+    // script written there and opened in their editor. The watcher puts it on
+    // the band, and every save after that.
+    @objc func editInbox() {
+        let file = inboxScript() ?? App.inboxFolder.appendingPathComponent("script.md")
+        if !FileManager.default.fileExists(atPath: file.path) {
+            do {
+                try FileManager.default.createDirectory(at: App.inboxFolder, withIntermediateDirectories: true)
+                try App.starter.write(to: file, atomically: true, encoding: .utf8)
+            } catch {
+                flash("Could not create \(file.path): \(error.localizedDescription)", alert: true)
+                return
+            }
+        }
+        // No app may be set to open Markdown files; TextEdit always is there.
+        if !NSWorkspace.shared.open(file) {
+            NSWorkspace.shared.open([file], withApplicationAt: URL(fileURLWithPath: "/System/Applications/TextEdit.app"),
+                                    configuration: NSWorkspace.OpenConfiguration())
+        }
     }
 
     @objc func revealScript() {
@@ -401,8 +532,9 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         say.font = .systemFont(ofSize: 27, weight: .semibold)
         say.alignment = .center
-        say.maximumNumberOfLines = 2
+        say.maximumNumberOfLines = 0
         say.lineBreakMode = .byWordWrapping
+        say.cell?.truncatesLastVisibleLine = true
         say.allowsDefaultTighteningForTruncation = true
 
         show.font = .systemFont(ofSize: 15, weight: .semibold)
@@ -438,11 +570,12 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if sections.isEmpty {
             meta.stringValue = "Prompteur"
             text = problem ?? ""
-            show.stringValue = "Menu bar icon → Open Script…"
+            show.stringValue = problemHint
         } else {
             let section = sections[s]
             let line = section.lines[l]
-            let title = section.title.isEmpty ? "\(s + 1)." : "\(s + 1). \(section.title)"
+            // A script with no heading has one untitled section: no number to give.
+            let title = section.title.isEmpty ? (sections.count > 1 ? "\(s + 1)." : "") : "\(s + 1). \(section.title)"
             let head = [title, section.subtitle, "\(l + 1)/\(section.lines.count)"].filter { !$0.isEmpty }
             meta.stringValue = head.joined(separator: " · ") + "   ⌥ next  ⌥← back  ⌥↓ ⌥↑ section  ⌥Q quit"
             text = line.say
@@ -458,25 +591,41 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         say.stringValue = text
         say.textColor = color
-        // Two lines at most: a long sentence shrinks rather than being cut.
-        var size: CGFloat = 27
-        while size > 17 {
+        // A long sentence shrinks, to three lines at most, rather than being
+        // cut; only past the smallest size is it ended with an ellipsis.
+        // Measured by the label itself, with no cap on its lines: capped, as it
+        // once was at two, it always answered that the text fitted.
+        // With nothing to show under it, the sentence has the blue line's
+        // room too, and sits in the middle of the band rather than above a gap.
+        let box: CGFloat = show.stringValue.isEmpty ? 78 : 66
+        let bottom: CGFloat = show.stringValue.isEmpty ? 10 : 28
+        func needed(_ size: CGFloat) -> CGFloat {
             say.font = .systemFont(ofSize: size, weight: .semibold)
-            let needed = say.sizeThatFits(NSSize(width: say.frame.width, height: 1000)).height
-            let lineHeight = say.font!.ascender - say.font!.descender + say.font!.leading
-            if needed <= lineHeight * 2 + 4 { break }
-            size -= 1
+            return ceil(say.sizeThatFits(NSSize(width: say.frame.width, height: 10_000)).height)
         }
-        let fit = say.sizeThatFits(NSSize(width: say.frame.width, height: 1000)).height
-        say.frame = NSRect(x: say.frame.minX, y: 28 + max(0, (66 - fit) / 2), width: say.frame.width, height: min(fit, 66))
+        var size: CGFloat = 27
+        while size > 15 && needed(size) > box { size -= 1 }
+        let fit = min(needed(size), box)
+        say.frame = NSRect(x: say.frame.minX, y: bottom + (box - fit) / 2, width: say.frame.width, height: fit)
+    }
+
+    // Moving on makes any notice on the band old news: "End of the script"
+    // over a sentence from the middle of it would be wrong.
+    func clearNotice() {
+        notice = nil
+        noticeTimer?.invalidate()
     }
 
     func step(_ d: Int) {
         guard !sections.isEmpty else { return }
+        clearNotice()
         let n = sections[s].lines.count
         if l + d >= n {
             // Past the last sentence, moving on opens the next section.
-            if s < sections.count - 1 { s += 1; l = 0 }
+            if s < sections.count - 1 { s += 1; l = 0 } else { flash("End of the script"); return }
+        } else if l + d < 0 {
+            // And back from the first one returns to the end of the one before.
+            if s > 0 { s -= 1; l = sections[s].lines.count - 1 } else { return }
         } else {
             l = max(0, l + d)
         }
@@ -485,6 +634,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func section(_ d: Int) {
         guard !sections.isEmpty else { return }
+        clearNotice()
         s = min(sections.count - 1, max(0, s + d))
         l = 0
         render()
@@ -492,6 +642,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func goToSection(_ item: NSMenuItem) {
         guard item.tag < sections.count else { return }
+        clearNotice()
         s = item.tag
         l = 0
         render()
@@ -577,19 +728,21 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         visible.state = capturable ? .on : .off
         menu.addItem(.separator())
 
+        add(inboxScript() == nil ? "Create ~/Prompteur/script.md" : "Edit ~/Prompteur/\(inboxScript()!.lastPathComponent)",
+            #selector(editInbox))
         add("Open Script…", #selector(openScript), key: "o", mods: .command)
-        let reload = add("Reload Script", #selector(reloadScript), key: "r", mods: .command)
-        reload.isEnabled = source != nil
         let bundled = bundledScript()
         if let bundled, source != bundled {
             add("Use Built-in Script", #selector(useBundledScript))
         }
         if let source {
             // The file on screen, shown where it can be found again.
-            let name = source == bundled ? "built-in"
-                : (source.path as NSString).abbreviatingWithTildeInPath
+            var name = source == bundled ? "built-in" : (source.path as NSString).abbreviatingWithTildeInPath
+            // A deep path would stretch the whole menu: its last two parts say enough.
+            if name.count > 48 { name = "…/" + source.pathComponents.suffix(2).joined(separator: "/") }
             let current = add("Script: \(name)", source == bundled ? nil : #selector(revealScript))
-            current.toolTip = "Show in Finder"
+            current.toolTip = source == bundled ? nil : "Show in Finder"
+            current.isEnabled = source != bundled
         }
         menu.addItem(.separator())
         add("Quit Prompteur", #selector(NSApplication.terminate(_:)), key: "q", mods: .option).target = NSApp
@@ -656,13 +809,23 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }, 1, &spec, nil, nil)
         let keys: [(UInt32, Int)] = [(1, kVK_RightArrow), (2, kVK_LeftArrow), (3, kVK_DownArrow),
                                      (4, kVK_UpArrow), (5, kVK_ANSI_Q), (6, kVK_ANSI_V)]
+        let names = ["⌥→", "⌥←", "⌥↓", "⌥↑", "⌥Q", "⌥V"]
+        var refused: [String] = []
         for (id, code) in keys {
             var ref: EventHotKeyRef?
             let status = RegisterEventHotKey(UInt32(code), UInt32(optionKey),
                                              EventHotKeyID(signature: OSType(0x50524D54), id: id),
                                              GetApplicationEventTarget(), 0, &ref)
-            if status != noErr && args.contains("--log") { print("hotkey \(id) refused: \(status)") }
+            if status != noErr { refused.append(names[Int(id) - 1]) }
             hotKeys.append(ref)
+        }
+        // Another app holding one of these is otherwise a key that silently
+        // does nothing here.
+        if !refused.isEmpty {
+            let list = refused.joined(separator: " ")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                self.flash("\(list) already used by another app: use the menu bar icon instead", alert: true)
+            }
         }
     }
 }

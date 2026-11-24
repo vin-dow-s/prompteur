@@ -56,8 +56,9 @@ All of them work whichever app is in front, without stealing its focus.
 | Drag the band | Move it anywhere; the place is remembered |
 | Right-click on the band | The menu |
 
-Past the last sentence of a section, moving on opens the next section.
-Clicking the band never moves the script, so you can put it where you want
+Past the last sentence of a section, moving on opens the next section, and
+going back from the first sentence returns to the end of the previous one.
+At the very end, the band says so. Clicking the band never moves the script, so you can put it where you want
 without losing your place. *Move Band Back Under the Camera* in the menu
 returns it to its first position.
 
@@ -107,7 +108,9 @@ a table under it is one sentence: what you say, then what you show.
   home folder; `script.json` works too). Prompteur watches that file: as soon
   as it is saved, the band switches to it, and every later save shows up
   within a second, without losing your place. This is the easiest way, and
-  the one to give an AI agent.
+  the one to give an AI agent. *Create ~/Prompteur/script.md* in the menu
+  writes a starter script there and opens it in your editor; once it exists,
+  the same item reads *Edit ~/Prompteur/script.md*.
 - **From the menu bar icon**: *Open Script…* picks a `.md` or `.json` file
   anywhere. Prompteur remembers it, opens it again at the next launch and
   reloads it when it changes. *Use Built-in Script* goes back to the one
@@ -124,6 +127,13 @@ At launch, Prompteur opens the last script you chose from the menu, then
 band stays on the section it was showing, found by its title, and a file
 caught half written leaves the previous version on screen until the next
 save.
+
+If a script cannot be read, the band says what is wrong in white and how to
+fix it in blue, for example *script.md has no sentence yet* over *Write each
+sentence as a table row*. A sentence too long for the band shrinks, down to
+three lines, rather than being cut; keep them short all the same, since a
+sentence you cannot read in one glance is one you will read with your eyes
+off the lens.
 
 ### Writing a script with an AI agent
 
