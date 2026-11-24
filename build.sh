@@ -13,7 +13,10 @@ id="${BUNDLE_ID:-local.prompteur}"
 script="${1:-$here/examples/demo.md}"
 
 mkdir -p "$out/Contents/MacOS" "$out/Contents/Resources"
-swiftc -swift-version 5 -O "$here/Sources/main.swift" -o "$out/Contents/MacOS/Prompteur"
+# Built for macOS 13 and later, as the Info.plist below says: without a
+# target, swiftc builds for the version of macOS it runs on and no older one.
+swiftc -swift-version 5 -O -target "$(uname -m)-apple-macos13.0" \
+  "$here/Sources/main.swift" -o "$out/Contents/MacOS/Prompteur"
 
 cat > "$out/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -39,6 +42,6 @@ case "$script" in
 esac
 
 # An ad hoc signature, so macOS runs a build that never left this Mac.
-codesign --force --sign - "$out" >/dev/null 2>&1 || true
+codesign --force --sign - "$out" 2>/dev/null || echo "Warning: could not sign $out" >&2
 echo "Built $out"
 echo "Open it with: open \"$out\""

@@ -38,29 +38,35 @@ own instead:
 sh build.sh path/to/script.md
 ```
 
+`build.sh` reads two environment variables: `OUT`, where to put the app, and
+`BUNDLE_ID`, its identifier (`local.prompteur` by default), under which its
+settings are kept.
+
 Prompteur has no Dock icon and no window of its own. It shows the band and a
 small speech-bubble icon in the menu bar.
 
 ## Shortcuts
 
 All of them work whichever app is in front, without stealing its focus.
+While Prompteur is open these combinations are its own: ⌥← and ⌥→ no longer
+move by word in a text field, and ⌥Q and ⌥V no longer type a character.
 
 | Shortcut | Action |
 |---|---|
-| **⌥** (Option alone, tapped) | Next sentence |
+| **⌥** (Option alone, tapped) or **⌥→** | Next sentence |
 | **⌥←** | Previous sentence |
 | **⌥↓** / **⌥↑** | Next / previous section |
 | **⌥V** | Show or hide the band in screenshots and recordings |
 | **⌥Q** | Quit |
 | **×** in the band's top-right corner | Quit |
 | Drag the band | Move it anywhere; the place is remembered |
-| Right-click on the band | The menu |
+| Right-click on the band | The same menu as the menu bar icon |
 
 Past the last sentence of a section, moving on opens the next section, and
 going back from the first sentence returns to the end of the previous one.
-At the very end, the band says so. Clicking the band never moves the script, so you can put it where you want
-without losing your place. *Move Band Back Under the Camera* in the menu
-returns it to its first position.
+At the very end, the band says so. Clicking the band never moves the script,
+so you can put it where you want without losing your place. *Move Band Back
+Under the Camera* in the menu returns it to its first position.
 
 Option on its own only counts when it is tapped alone: holding it, or using it
 with another key or a click (⌥←, typing a special character, an ⌥-click),
@@ -70,8 +76,8 @@ does not move the script.
 
 By default the band is excluded from capture, so a screen recording shows
 your screen without the script on top of it. To show the band, for example in
-a demo of the tool itself, press **⌥V** or tick **Visible in Screenshots and
-Recordings** in the menu bar menu. The band says which way it went, and the
+a demo of the tool itself, press **⌥V** or flip the **Visible in Screenshots
+and Recordings** switch in the menu. The band says which way it went, and the
 menu bar icon fills in while it is visible. The setting is remembered between
 launches.
 
@@ -104,25 +110,33 @@ a table under it is one sentence: what you say, then what you show.
 
 ### Loading a script
 
-- **Write it to `~/Prompteur/script.md`** (the folder `Prompteur` in your
-  home folder; `script.json` works too). Prompteur watches that file: as soon
-  as it is saved, the band switches to it, and every later save shows up
-  within a second, without losing your place. This is the easiest way, and
-  the one to give an AI agent. *Create ~/Prompteur/script.md* in the menu
-  writes a starter script there and opens it in the app you open Markdown
-  with, or in your default text editor if that app is Xcode (which claims
-  `.md` files on any Mac it is installed on). Once the file exists, the same
-  item reads *Edit ~/Prompteur/script.md*.
-- **From the menu bar icon**: *Open Script…* picks a `.md` or `.json` file
-  anywhere. Prompteur remembers it, opens it again at the next launch and
-  reloads it when it changes. *Use Built-in Script* goes back to the one
-  built into the app.
-- **Built into the app**: `sh build.sh path/to/script.md`.
-- **From the command line**, for one launch:
+The **Script** submenu of the menu lists the scripts the band can show, with
+a tick on the one it is showing:
 
-  ```sh
-  build/Prompteur.app/Contents/MacOS/Prompteur --script path/to/script.md
-  ```
+- **~/Prompteur/script.md** (the folder `Prompteur` in your home folder;
+  `script.json` works too). Prompteur watches that file: as soon as it is
+  saved, the band switches to it, and every later save shows up within a
+  second, without losing your place. This is the easiest way, and the one to
+  give an AI agent. Until the file exists the item reads *Create
+  ~/Prompteur/script.md*: it writes a starter script there and opens it for
+  you to edit.
+- **Built-in Script**: the one built into the app, which is the demo unless
+  you ran `sh build.sh path/to/script.md`.
+- **Choose a File…** picks a `.md` or `.json` file anywhere. Prompteur
+  remembers it, opens it again at the next launch and reloads it when it
+  changes. For a file in Documents, Desktop or Downloads, macOS asks you to
+  allow it.
+
+Under them, *Edit Script* opens the script on the band in the app you open
+Markdown with, or in your default text editor if that app is Xcode (which
+claims `.md` files on any Mac it is installed on), and *Show in Finder* shows
+where the file is.
+
+A script can also be given on the command line, for one launch:
+
+```sh
+build/Prompteur.app/Contents/MacOS/Prompteur --script path/to/script.md
+```
 
 At launch, Prompteur opens the last script you chose from the menu, then
 `~/Prompteur/script.md`, then the built-in one. When a script is edited, the
@@ -175,20 +189,6 @@ If you generate scripts from another tool, Prompteur also reads JSON:
 
 Only `lines` and each line's `say` are required.
 
-## Command-line options
-
-| Option | Effect |
-|---|---|
-| `--script FILE` | Read this script for this launch |
-| `--section N`, `--line N` | Start at this section and sentence (from 1) |
-| `--visible` | Visible in screenshots and recordings for this launch |
-| `--snapshot FILE.png` | Draw the band into an image and quit, to check a layout |
-| `--log` | Print each sentence as it is shown (`section\|line\|text`) |
-
-`build.sh` reads two environment variables: `OUT`, where to put the app, and
-`BUNDLE_ID`, its identifier (`local.prompteur` by default), under which its
-settings are kept.
-
 ## How it works
 
 - The band is an `NSPanel` that can never become the key window, at the
@@ -197,8 +197,10 @@ settings are kept.
   which needs no permission.
 - Option alone cannot be registered as a hot key, and listening to the
   keyboard would need the Accessibility permission, so Prompteur reads the
-  state of the modifier keys sixty times a second instead.
+  state of the modifier keys sixty times a second instead. It never sees
+  which keys you type.
 - The band sits below the notch, where a full-screen app's pixels begin.
+- It makes no network connection, and the only files it reads are scripts.
 
 ## License
 

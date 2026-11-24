@@ -6,9 +6,9 @@ import Carbon.HIToolbox
 import UniformTypeIdentifiers
 
 struct Line: Decodable {
-    var say: String
-    var show: String = ""
-    var highlight: Bool = false
+    let say: String
+    let show: String
+    let highlight: Bool
 
     init(say: String, show: String, highlight: Bool) {
         self.say = say
@@ -27,8 +27,8 @@ struct Line: Decodable {
 }
 
 struct Section: Decodable {
-    var title: String
-    var subtitle: String = ""
+    let title: String
+    let subtitle: String
     var lines: [Line] = []
 
     init(title: String, subtitle: String) {
@@ -50,7 +50,7 @@ struct Section: Decodable {
 // for the blue one under it.
 struct ScriptError: LocalizedError {
     static let fixIt = "Fix the file and save it: the band reads it again"
-    static let chooseOne = "Menu bar icon → Create ~/Prompteur/script.md, or Open Script…"
+    static let chooseOne = "Menu bar icon → Script → Create ~/Prompteur/script.md, or Choose a File…"
     let errorDescription: String?
     let hint: String
     init(_ message: String, hint: String = ScriptError.fixIt) {
@@ -60,11 +60,21 @@ struct ScriptError: LocalizedError {
 }
 
 enum Script {
+    // Far more than a script needs, and little enough that a file picked by
+    // mistake, a log of gigabytes say, cannot freeze the band while it is read.
+    static let maxBytes = 1_000_000
+
     static func load(_ url: URL) throws -> [Section] {
-        guard let data = try? Data(contentsOf: url) else {
-            throw FileManager.default.fileExists(atPath: url.path)
-                ? ScriptError("\(url.lastPathComponent) could not be opened")
-                : ScriptError("\(url.lastPathComponent) was not found", hint: ScriptError.chooseOne)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw ScriptError("\(url.lastPathComponent) was not found", hint: ScriptError.chooseOne)
+        }
+        let file = try? url.resolvingSymlinksInPath().resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+        if let size = file?.fileSize, size > maxBytes {
+            throw ScriptError("\(url.lastPathComponent) is too big to be a script",
+                              hint: "A script is a text file of 1 MB at most")
+        }
+        guard file?.isRegularFile == true, let data = try? Data(contentsOf: url) else {
+            throw ScriptError("\(url.lastPathComponent) could not be opened")
         }
         let sections: [Section]
         if url.pathExtension.lowercased() == "json" {
@@ -201,38 +211,89 @@ final class CloseButton: NSButton {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
+// A menu row with a switch. A ticked menu item shows nothing while it is
+// off, so nothing says it is a setting; a switch shows both states, and
+// flipping it leaves the menu open.
+final class SwitchRow: NSView {
+    let toggle = NSSwitch()
+    let onChange: (Bool) -> Void
+
+    init(title: String, shortcut: String, isOn: Bool, onChange: @escaping (Bool) -> Void) {
+        self.onChange = onChange
+        super.init(frame: .zero)
+        let label = NSTextField(labelWithString: title)
+        let keys = NSTextField(labelWithString: shortcut)
+        keys.textColor = .tertiaryLabelColor
+        toggle.controlSize = .mini
+        toggle.state = isOn ? .on : .off
+        toggle.target = self
+        toggle.action = #selector(changed)
+        toggle.setAccessibilityLabel(title)
+        for view in [label, keys, toggle] {
+            (view as? NSTextField)?.font = .menuFont(ofSize: 0)
+            view.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(view)
+            view.centerYAnchor.constraint(equalTo: centerYAnchor).isActive = true
+        }
+        // Where a menu starts its own titles, and how tall its rows are, so
+        // that this row lines up with the ones around it. macOS 26 made its
+        // menus roomier.
+        var inset: CGFloat = 14
+        var height: CGFloat = 22
+        if #available(macOS 26, *) {
+            inset = 16
+            height = 24
+        }
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: height),
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: inset),
+            keys.leadingAnchor.constraint(greaterThanOrEqualTo: label.trailingAnchor, constant: 40),
+            toggle.leadingAnchor.constraint(equalTo: keys.trailingAnchor, constant: 8),
+            trailingAnchor.constraint(equalTo: toggle.trailingAnchor, constant: inset + 2),
+        ])
+        // The menu is as wide as this row needs, and stretches it if another
+        // item needs more.
+        setFrameSize(fittingSize)
+        autoresizingMask = .width
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    @objc func changed() { onChange(toggle.state == .on) }
+
+    // A click anywhere on the row flips the switch, not only one on it.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let hit = super.hitTest(point)
+        return hit is NSSwitch ? hit : (hit == nil ? nil : self)
+    }
+    override func mouseUp(with event: NSEvent) { toggle.performClick(nil) }
+}
+
 final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var sections: [Section] = []
-    var s = 0
-    var l = 0
+    var sectionIndex = 0
+    var lineIndex = 0
     var source: URL?
     var problem: String?
     var problemHint = ""
     var panel: Panel!
     var statusItem: NSStatusItem!
     let menu = NSMenu()
-    var hotKeys: [EventHotKeyRef?] = []
     let meta = NSTextField(labelWithString: "")
     let say = NSTextField(wrappingLabelWithString: "")
     let show = NSTextField(labelWithString: "")
-    let args = CommandLine.arguments
     let defaults = UserDefaults.standard
 
     var capturable = false
     var notice: String?
     var noticeAlert = false
     var noticeTimer: Timer?
-    var lastToggle = Date.distantPast
-
-    func arg(_ name: String) -> String? {
-        guard let i = args.firstIndex(of: name), i + 1 < args.count else { return nil }
-        return args[i + 1]
-    }
+    weak var captureSwitch: NSSwitch?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Hidden from screenshots and recordings unless asked: the band is
         // there for the person reading it, not for the people watching.
-        capturable = args.contains("--visible") || defaults.bool(forKey: "visibleInCaptures")
+        capturable = defaults.bool(forKey: "visibleInCaptures")
         build()
         buildStatusItem()
         registerHotKeys()
@@ -240,31 +301,13 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         load(initialScript())
         watchScripts()
-        if let n = arg("--section").flatMap(Int.init), !sections.isEmpty {
-            s = min(max(n - 1, 0), sections.count - 1)
-        } else if defaults.integer(forKey: "section") < sections.count {
-            s = defaults.integer(forKey: "section")
-        }
-        if let n = arg("--line").flatMap(Int.init), !sections.isEmpty {
-            l = min(max(n - 1, 0), sections[s].lines.count - 1)
+        if sections.indices.contains(defaults.integer(forKey: "section")) {
+            sectionIndex = defaults.integer(forKey: "section")
         }
         render()
-
-        // --snapshot file.png: the band draws itself into an image and quits.
-        // It checks the layout without needing a screen capture.
-        if let path = arg("--snapshot"), let view = panel.contentView {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-                if let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
-                    view.cacheDisplay(in: view.bounds, to: rep)
-                    try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
-                }
-                print("level \(self.panel.level.rawValue) frame \(self.panel.frame) sharing \(self.panel.sharingType.rawValue)")
-                NSApp.terminate(nil)
-            }
-        }
     }
 
-    // --- Scripts ---
+    // MARK: - Scripts
 
     func bundledScript() -> URL? {
         guard let res = Bundle.main.resourceURL else { return nil }
@@ -283,14 +326,17 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             .max { (modified($0) ?? .distantPast) < (modified($1) ?? .distantPast) }
     }
 
+    // Of the file a link points to: the link's own date never changes.
     func modified(_ url: URL) -> Date? {
-        (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+        (try? FileManager.default.attributesOfItem(atPath: url.resolvingSymlinksInPath().path))?[.modificationDate] as? Date
     }
 
-    // What the user chose last wins: a file opened from the menu, or the
-    // built-in script ("builtin"). Then the inbox, then the built-in one.
+    // --script FILE on the command line, for this launch. Otherwise what the
+    // user chose last wins: a file opened from the menu, or the built-in
+    // script ("builtin"). Then the inbox, then the built-in one.
     func initialScript() -> URL? {
-        if let path = arg("--script") { return URL(fileURLWithPath: path) }
+        let args = CommandLine.arguments
+        if let i = args.firstIndex(of: "--script"), i + 1 < args.count { return URL(fileURLWithPath: args[i + 1]) }
         let saved = defaults.string(forKey: "scriptPath")
         if saved == "builtin", let bundled = bundledScript() { return bundled }
         if let saved, saved != "builtin", FileManager.default.fileExists(atPath: saved) {
@@ -316,8 +362,8 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             problem = error.localizedDescription
             problemHint = (error as? ScriptError)?.hint ?? ScriptError.fixIt
         }
-        s = min(s, max(sections.count - 1, 0))
-        l = sections.isEmpty ? 0 : min(l, sections[s].lines.count - 1)
+        sectionIndex = min(sectionIndex, max(sections.count - 1, 0))
+        lineIndex = sections.isEmpty ? 0 : min(lineIndex, sections[sectionIndex].lines.count - 1)
     }
 
     // Reads the script again after an edit. The place is kept by section
@@ -328,17 +374,17 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         sourceSeen = modified(url)
         do {
             let fresh = try Script.load(url)
-            let title = sections.indices.contains(s) ? sections[s].title : nil
+            let title = sections.indices.contains(sectionIndex) ? sections[sectionIndex].title : nil
             sections = fresh
             source = url
             problem = nil
             if keepPlace {
-                if let title, let i = fresh.firstIndex(where: { $0.title == title }) { s = i }
-                s = min(s, fresh.count - 1)
-                l = min(l, fresh[s].lines.count - 1)
+                if let title, let i = fresh.firstIndex(where: { $0.title == title }) { sectionIndex = i }
+                sectionIndex = min(sectionIndex, fresh.count - 1)
+                lineIndex = min(lineIndex, fresh[sectionIndex].lines.count - 1)
             } else {
-                s = 0
-                l = 0
+                sectionIndex = 0
+                lineIndex = 0
             }
             flash(announce)
         } catch {
@@ -349,7 +395,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if sections.isEmpty {
                 source = url
                 problem = error.localizedDescription
-            problemHint = (error as? ScriptError)?.hint ?? ScriptError.fixIt
+                problemHint = (error as? ScriptError)?.hint ?? ScriptError.fixIt
                 render()
             } else {
                 flash(error.localizedDescription, alert: true)
@@ -414,10 +460,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.openDialog = nil
             if response == .OK, let url = dialog.url {
                 self.defaults.set(url.path, forKey: "scriptPath")
-                self.s = 0
-                self.l = 0
-                self.load(url)
-                self.render()
+                self.start(url)
             }
             // The keyboard goes back to the app being shown, as it was.
             if let previous, previous != NSRunningApplication.current {
@@ -426,12 +469,25 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    // Puts a script on the band, from its first sentence.
+    func start(_ url: URL?) {
+        sectionIndex = 0
+        lineIndex = 0
+        load(url)
+        render()
+    }
+
     @objc func useBundledScript() {
         defaults.set("builtin", forKey: "scriptPath")
-        s = 0
-        l = 0
-        load(bundledScript())
-        render()
+        start(bundledScript())
+    }
+
+    // With no script chosen from the menu, the inbox is what a launch opens.
+    @objc func useInbox() {
+        guard let inbox = inboxScript() else { return }
+        defaults.removeObject(forKey: "scriptPath")
+        inboxSeen = modified(inbox)
+        start(inbox)
     }
 
     static let starter = """
@@ -453,10 +509,9 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     """
 
     // The inbox made for somebody who has never seen the format: a starter
-    // script written there and opened in their editor. The watcher puts it on
-    // the band, and every save after that.
-    @objc func editInbox() {
-        let file = inboxScript() ?? App.inboxFolder.appendingPathComponent("script.md")
+    // script written there, put on the band and opened in their editor.
+    @objc func createInbox() {
+        let file = App.inboxFolder.appendingPathComponent("script.md")
         if !FileManager.default.fileExists(atPath: file.path) {
             do {
                 try FileManager.default.createDirectory(at: App.inboxFolder, withIntermediateDirectories: true)
@@ -466,7 +521,13 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 return
             }
         }
-        NSWorkspace.shared.open([file], withApplicationAt: editor(for: file), configuration: NSWorkspace.OpenConfiguration())
+        useInbox()
+        editScript()
+    }
+
+    @objc func editScript() {
+        guard let source else { return }
+        NSWorkspace.shared.open([source], withApplicationAt: editor(for: source), configuration: NSWorkspace.OpenConfiguration())
     }
 
     // The app set to open Markdown, unless it is Xcode: installing Xcode
@@ -484,7 +545,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSWorkspace.shared.activateFileViewerSelecting([source])
     }
 
-    // --- The band ---
+    // MARK: - The band
 
     // Centred under the camera. Below the notch: the pixels beside it do not
     // exist for a full-screen app, and the text there would be half hidden.
@@ -515,7 +576,6 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.backgroundColor = .clear
         panel.hasShadow = true
         panel.hidesOnDeactivate = false
-        panel.isMovableByWindowBackground = false
         applyCapture()
         NotificationCenter.default.addObserver(forName: NSWindow.didMoveNotification, object: panel, queue: .main) { [weak self] _ in
             guard let self else { return }
@@ -578,17 +638,16 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             text = problem ?? ""
             show.stringValue = problemHint
         } else {
-            let section = sections[s]
-            let line = section.lines[l]
+            let section = sections[sectionIndex]
+            let line = section.lines[lineIndex]
             // A script with no heading has one untitled section: no number to give.
-            let title = section.title.isEmpty ? (sections.count > 1 ? "\(s + 1)." : "") : "\(s + 1). \(section.title)"
-            let head = [title, section.subtitle, "\(l + 1)/\(section.lines.count)"].filter { !$0.isEmpty }
+            let title = section.title.isEmpty ? (sections.count > 1 ? "\(sectionIndex + 1)." : "") : "\(sectionIndex + 1). \(section.title)"
+            let head = [title, section.subtitle, "\(lineIndex + 1)/\(section.lines.count)"].filter { !$0.isEmpty }
             meta.stringValue = head.joined(separator: " · ") + "   ⌥ next  ⌥← back  ⌥↓ ⌥↑ section  ⌥Q quit"
             text = line.say
             if line.highlight { color = NSColor(red: 1, green: 0.84, blue: 0.04, alpha: 1) }
             show.stringValue = line.show
-            defaults.set(s, forKey: "section")
-            if args.contains("--log") { print("\(s + 1)|\(l + 1)|\(line.say)"); fflush(stdout) }
+            defaults.set(sectionIndex, forKey: "section")
         }
         meta.textColor = NSColor(white: 0.55, alpha: 1)
         if let notice {
@@ -625,32 +684,32 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func step(_ d: Int) {
         guard !sections.isEmpty else { return }
         clearNotice()
-        let n = sections[s].lines.count
-        if l + d >= n {
+        let n = sections[sectionIndex].lines.count
+        if lineIndex + d >= n {
             // Past the last sentence, moving on opens the next section.
-            if s < sections.count - 1 { s += 1; l = 0 } else { flash("End of the script"); return }
-        } else if l + d < 0 {
+            if sectionIndex < sections.count - 1 { sectionIndex += 1; lineIndex = 0 } else { flash("End of the script"); return }
+        } else if lineIndex + d < 0 {
             // And back from the first one returns to the end of the one before.
-            if s > 0 { s -= 1; l = sections[s].lines.count - 1 } else { return }
+            if sectionIndex > 0 { sectionIndex -= 1; lineIndex = sections[sectionIndex].lines.count - 1 } else { return }
         } else {
-            l = max(0, l + d)
+            lineIndex += d
         }
         render()
     }
 
-    func section(_ d: Int) {
+    func stepSection(_ d: Int) {
         guard !sections.isEmpty else { return }
         clearNotice()
-        s = min(sections.count - 1, max(0, s + d))
-        l = 0
+        sectionIndex = min(sections.count - 1, max(0, sectionIndex + d))
+        lineIndex = 0
         render()
     }
 
     @objc func goToSection(_ item: NSMenuItem) {
         guard item.tag < sections.count else { return }
         clearNotice()
-        s = item.tag
-        l = 0
+        sectionIndex = item.tag
+        lineIndex = 0
         render()
     }
 
@@ -659,7 +718,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         defaults.removeObject(forKey: "bandOrigin")
     }
 
-    // --- Visible in screenshots and recordings ---
+    // MARK: - Visible in screenshots and recordings
 
     func applyCapture() {
         // .none keeps the band out of screenshots and screen recordings,
@@ -670,16 +729,16 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Prompteur")
         image?.isTemplate = true
         statusItem?.button?.image = image
+        // ⌥V with the menu open: its switch follows.
+        captureSwitch?.state = capturable ? .on : .off
     }
 
-    @objc func toggleCapture() {
-        // The menu's own ⌥V and the global hot key can both fire for one press.
-        if Date().timeIntervalSince(lastToggle) < 0.3 { return }
-        lastToggle = Date()
-        capturable.toggle()
-        defaults.set(capturable, forKey: "visibleInCaptures")
+    // Set by the switch in the menu, or by ⌥V.
+    func setCapture(_ visible: Bool) {
+        capturable = visible
+        defaults.set(visible, forKey: "visibleInCaptures")
         applyCapture()
-        flash(capturable ? "● Visible in screenshots and recordings" : "Hidden from screenshots and recordings", alert: capturable)
+        flash(visible ? "● Visible in screenshots and recordings" : "Hidden from screenshots and recordings", alert: visible)
     }
 
     func flash(_ text: String, alert: Bool = false) {
@@ -693,7 +752,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         render()
     }
 
-    // --- Menu bar ---
+    // MARK: - Menu bar
 
     func buildStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -705,56 +764,75 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
-        @discardableResult
-        func add(_ title: String, _ action: Selector?, key: String = "", mods: NSEvent.ModifierFlags = []) -> NSMenuItem {
+        func item(_ title: String, _ action: Selector?, key: String = "", mods: NSEvent.ModifierFlags = [],
+                  on: Bool = false, submenu: NSMenu? = nil) -> NSMenuItem {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
             item.keyEquivalentModifierMask = mods
             item.target = self
-            menu.addItem(item)
+            item.state = on ? .on : .off
+            item.submenu = submenu
             return item
         }
 
-        if !sections.isEmpty {
-            let go = add("Go to Section", nil)
-            let sub = NSMenu()
-            for (i, section) in sections.enumerated() {
-                let name = section.title.isEmpty ? "Section \(i + 1)" : section.title
-                let item = NSMenuItem(title: "\(i + 1). \(name)", action: #selector(goToSection(_:)), keyEquivalent: "")
-                item.target = self
-                item.tag = i
-                item.state = i == s ? .on : .off
-                sub.addItem(item)
-            }
-            go.submenu = sub
-            menu.addItem(.separator())
-        }
-
-        add("Move Band Back Under the Camera", #selector(resetPosition))
-        let visible = add("Visible in Screenshots and Recordings", #selector(toggleCapture), key: "v", mods: .option)
-        visible.state = capturable ? .on : .off
-        menu.addItem(.separator())
-
-        add(inboxScript() == nil ? "Create ~/Prompteur/script.md" : "Edit ~/Prompteur/\(inboxScript()!.lastPathComponent)",
-            #selector(editInbox))
-        add("Open Script…", #selector(openScript), key: "o", mods: .command)
+        // The scripts the band can show, the one it shows ticked, then what
+        // can be done with that one.
+        let inbox = inboxScript()
         let bundled = bundledScript()
-        if let bundled, source != bundled {
-            add("Use Built-in Script", #selector(useBundledScript))
+        let name = source.map { $0 == bundled ? "Built-in" : shortPath($0) } ?? "None"
+        let scripts = NSMenu()
+        scripts.autoenablesItems = false
+        if let inbox {
+            scripts.addItem(item("~/Prompteur/\(inbox.lastPathComponent)", #selector(useInbox), on: source == inbox))
+        } else {
+            scripts.addItem(item("Create ~/Prompteur/script.md", #selector(createInbox)))
         }
-        if let source {
-            // The file on screen, shown where it can be found again.
-            var name = source == bundled ? "built-in" : (source.path as NSString).abbreviatingWithTildeInPath
-            // A deep path would stretch the whole menu: its last two parts say enough.
-            if name.count > 48 { name = "…/" + source.pathComponents.suffix(2).joined(separator: "/") }
-            let current = add("Script: \(name)", source == bundled ? nil : #selector(revealScript))
-            current.toolTip = source == bundled ? nil : "Show in Finder"
-            current.isEnabled = source != bundled
+        if bundled != nil {
+            scripts.addItem(item("Built-in Script", #selector(useBundledScript), on: source == bundled))
+        }
+        if let source, source != inbox, source != bundled { scripts.addItem(item(name, nil, on: true)) }
+        scripts.addItem(item("Choose a File…", #selector(openScript), key: "o", mods: .command))
+        scripts.addItem(.separator())
+        // The built-in script is part of the app: not a file to edit.
+        for action in [item("Edit Script", #selector(editScript)), item("Show in Finder", #selector(revealScript))] {
+            action.isEnabled = source != nil && source != bundled
+            scripts.addItem(action)
+        }
+        menu.addItem(item("Script: \(name)", nil, submenu: scripts))
+
+        if !sections.isEmpty {
+            let list = NSMenu()
+            for (i, section) in sections.enumerated() {
+                let title = section.title.isEmpty ? "Section \(i + 1)" : "\(i + 1). \(section.title)"
+                let entry = item(title, #selector(goToSection(_:)), on: i == sectionIndex)
+                entry.tag = i
+                list.addItem(entry)
+            }
+            menu.addItem(item("Go to Section", nil, submenu: list))
         }
         menu.addItem(.separator())
-        add("Quit Prompteur", #selector(NSApplication.terminate(_:)), key: "q", mods: .option).target = NSApp
+
+        let capture = SwitchRow(title: "Visible in Screenshots and Recordings", shortcut: "⌥V", isOn: capturable) { [weak self] in
+            self?.setCapture($0)
+        }
+        captureSwitch = capture.toggle
+        let row = NSMenuItem()
+        row.view = capture
+        menu.addItem(row)
+        menu.addItem(item("Move Band Back Under the Camera", #selector(resetPosition)))
+        menu.addItem(.separator())
+
+        let quit = item("Quit Prompteur", #selector(NSApplication.terminate(_:)), key: "q", mods: .option)
+        quit.target = NSApp
+        menu.addItem(quit)
     }
 
-    // --- Keyboard ---
+    // A deep path would stretch the whole menu: its last two parts say enough.
+    func shortPath(_ url: URL) -> String {
+        let path = (url.path as NSString).abbreviatingWithTildeInPath
+        return path.count > 48 ? "…/" + url.pathComponents.suffix(2).joined(separator: "/") : path
+    }
+
+    // MARK: - Keyboard
 
     // Option alone, pressed then released, moves to the next sentence. Carbon
     // cannot register a shortcut with no key, and listening to the keyboard
@@ -793,11 +871,31 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         switch id {
         case 1: step(1)
         case 2: step(-1)
-        case 3: section(1)
-        case 4: section(-1)
+        case 3: stepSection(1)
+        case 4: stepSection(-1)
         case 5: NSApp.terminate(nil)
-        case 6: toggleCapture()
+        case 6: setCapture(!capturable)
         default: break
+        }
+    }
+
+    // The key that types a letter on the keyboard in use, read once at launch.
+    // A hot key is registered by the place of its key, and Q is not in the
+    // same place on an AZERTY keyboard as on a QWERTY one.
+    func keyCode(typing letter: String, else fallback: Int) -> Int {
+        guard let source = TISCopyCurrentASCIICapableKeyboardLayoutInputSource()?.takeRetainedValue(),
+              let property = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData) else { return fallback }
+        let data = Unmanaged<CFData>.fromOpaque(property).takeUnretainedValue() as Data
+        return data.withUnsafeBytes { bytes in
+            guard let layout = bytes.bindMemory(to: UCKeyboardLayout.self).baseAddress else { return fallback }
+            return (0..<128).first { code in
+                var deadKeys: UInt32 = 0
+                var length = 0
+                var typed = [UniChar](repeating: 0, count: 4)
+                UCKeyTranslate(layout, UInt16(code), UInt16(kUCKeyActionDisplay), 0, UInt32(LMGetKbdType()),
+                               OptionBits(kUCKeyTranslateNoDeadKeysBit), &deadKeys, typed.count, &length, &typed)
+                return String(utf16CodeUnits: typed, count: length) == letter
+            } ?? fallback
         }
     }
 
@@ -813,17 +911,16 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             DispatchQueue.main.async { (NSApp.delegate as? App)?.hotKey(n) }
             return noErr
         }, 1, &spec, nil, nil)
-        let keys: [(UInt32, Int)] = [(1, kVK_RightArrow), (2, kVK_LeftArrow), (3, kVK_DownArrow),
-                                     (4, kVK_UpArrow), (5, kVK_ANSI_Q), (6, kVK_ANSI_V)]
-        let names = ["⌥→", "⌥←", "⌥↓", "⌥↑", "⌥Q", "⌥V"]
+        let keys: [(id: UInt32, name: String, code: Int)] = [
+            (1, "⌥→", kVK_RightArrow), (2, "⌥←", kVK_LeftArrow), (3, "⌥↓", kVK_DownArrow), (4, "⌥↑", kVK_UpArrow),
+            (5, "⌥Q", keyCode(typing: "q", else: kVK_ANSI_Q)), (6, "⌥V", keyCode(typing: "v", else: kVK_ANSI_V))]
         var refused: [String] = []
-        for (id, code) in keys {
+        for key in keys {
             var ref: EventHotKeyRef?
-            let status = RegisterEventHotKey(UInt32(code), UInt32(optionKey),
-                                             EventHotKeyID(signature: OSType(0x50524D54), id: id),
+            let status = RegisterEventHotKey(UInt32(key.code), UInt32(optionKey),
+                                             EventHotKeyID(signature: OSType(0x50524D54), id: key.id),  // "PRMT"
                                              GetApplicationEventTarget(), 0, &ref)
-            if status != noErr { refused.append(names[Int(id) - 1]) }
-            hotKeys.append(ref)
+            if status != noErr { refused.append(key.name) }
         }
         // Another app holding one of these is otherwise a key that silently
         // does nothing here.
