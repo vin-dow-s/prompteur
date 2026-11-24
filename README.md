@@ -49,10 +49,14 @@ All of them work whichever app is in front, without stealing its focus.
 | **⌥↓** / **⌥↑** | Next / previous section |
 | **⌥V** | Show or hide the band in screenshots and recordings |
 | **⌥Q** | Quit |
-| Click on the band | Next sentence (the left quarter goes back) |
+| **×** in the band's top-right corner | Quit |
+| Drag the band | Move it anywhere; the place is remembered |
 | Right-click on the band | The menu |
 
 Past the last sentence of a section, moving on opens the next section.
+Clicking the band never moves the script, so you can put it where you want
+without losing your place. *Move Band Back Under the Camera* in the menu
+returns it to its first position.
 
 Option on its own only counts when it is tapped alone: holding it, or using it
 with another key or a click (⌥←, typing a special character, an ⌥-click),

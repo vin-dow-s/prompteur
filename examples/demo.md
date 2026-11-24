@@ -19,7 +19,7 @@ in the file, like this paragraph, is ignored, so a script can carry notes.
 | Tap Option on its own to go to the next sentence. | ⌥ |
 | Option and left arrow goes back one sentence. | ⌥← |
 | Option with the down or up arrow jumps to the next or previous section. | ⌥↓ ⌥↑ |
-| You can also click the band: anywhere moves on, the left quarter goes back. | Click the band |
+| Drag the band wherever you like, and the little cross closes it. | Drag the band |
 
 ## Recording · screenshots and screen recordings
 

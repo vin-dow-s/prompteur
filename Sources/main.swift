@@ -119,19 +119,23 @@ final class Panel: NSPanel {
 }
 
 final class StripView: NSView {
-    var onStep: ((Int) -> Void)?
     var onMenu: ((NSEvent) -> Void)?
 
-    // The whole band is one target: the labels do not take the click.
+    // The whole band is one handle to drag it by: the labels do not take the
+    // click, only the close button does.
     override func hitTest(_ point: NSPoint) -> NSView? {
+        if let hit = super.hitTest(point), hit is NSButton { return hit }
         return frame.contains(point) ? self : nil
     }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-    override func mouseDown(with event: NSEvent) {
-        let x = convert(event.locationInWindow, from: nil).x
-        onStep?(x < bounds.width / 4 ? -1 : 1)
-    }
+    // A click does nothing but move the band: with a click that also stepped
+    // through the script, putting the band in place cost a sentence.
+    override func mouseDown(with event: NSEvent) { window?.performDrag(with: event) }
     override func rightMouseDown(with event: NSEvent) { onMenu?(event) }
+}
+
+final class CloseButton: NSButton {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
 final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
@@ -256,15 +260,26 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // --- The band ---
 
-    func build() {
+    // Centred under the camera. Below the notch: the pixels beside it do not
+    // exist for a full-screen app, and the text there would be half hidden.
+    func homeRect() -> NSRect {
         let screen = NSScreen.main ?? NSScreen.screens[0]
         let f = screen.frame
-        // Below the notch: the pixels beside it do not exist for a
-        // full-screen app, and the text there would be half hidden.
         let top = f.maxY - screen.safeAreaInsets.top
         let w = min(f.width - 240, 1120)
         let h: CGFloat = 118
-        let rect = NSRect(x: f.midX - w / 2, y: top - h - 2, width: w, height: h)
+        return NSRect(x: f.midX - w / 2, y: top - h - 2, width: w, height: h)
+    }
+
+    func build() {
+        var rect = homeRect()
+        let h = rect.height
+        if let saved = defaults.string(forKey: "bandOrigin") {
+            let moved = NSRect(origin: NSPointFromString(saved), size: rect.size)
+            // Only where a screen still is: a band saved on a display that has
+            // since been unplugged would be out of reach.
+            if NSScreen.screens.contains(where: { $0.frame.intersects(moved) }) { rect = moved }
+        }
 
         panel = Panel(contentRect: rect, styleMask: [.borderless, .nonactivatingPanel],
                       backing: .buffered, defer: false)
@@ -276,12 +291,15 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.hidesOnDeactivate = false
         panel.isMovableByWindowBackground = false
         applyCapture()
+        NotificationCenter.default.addObserver(forName: NSWindow.didMoveNotification, object: panel, queue: .main) { [weak self] _ in
+            guard let self else { return }
+            self.defaults.set(NSStringFromPoint(self.panel.frame.origin), forKey: "bandOrigin")
+        }
 
         let view = StripView(frame: NSRect(origin: .zero, size: rect.size))
         view.wantsLayer = true
         view.layer?.backgroundColor = NSColor(white: 0, alpha: 0.94).cgColor
         view.layer?.cornerRadius = 14
-        view.onStep = { [weak self] d in self?.step(d) }
         view.onMenu = { [weak self] event in
             guard let self else { return }
             self.menuNeedsUpdate(self.menu)
@@ -305,10 +323,21 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let pad: CGFloat = 22
         let inner = rect.width - pad * 2
-        meta.frame = NSRect(x: pad, y: h - 23, width: inner, height: 16)
+        meta.frame = NSRect(x: pad + 24, y: h - 23, width: inner - 48, height: 16)
         say.frame = NSRect(x: pad, y: 28, width: inner, height: 66)
         show.frame = NSRect(x: pad, y: 6, width: inner, height: 20)
         for label in [meta, say, show] { view.addSubview(label) }
+
+        let close = CloseButton(frame: NSRect(x: rect.width - 32, y: h - 28, width: 22, height: 22))
+        close.isBordered = false
+        close.imagePosition = .imageOnly
+        close.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Quit Prompteur")
+        close.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 11, weight: .bold)
+        close.contentTintColor = NSColor(white: 0.5, alpha: 1)
+        close.toolTip = "Quit Prompteur (⌥Q)"
+        close.target = NSApp
+        close.action = #selector(NSApplication.terminate(_:))
+        view.addSubview(close)
 
         panel.contentView = view
         panel.orderFrontRegardless()
@@ -377,6 +406,11 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         s = item.tag
         l = 0
         render()
+    }
+
+    @objc func resetPosition() {
+        panel.setFrame(homeRect(), display: true)
+        defaults.removeObject(forKey: "bandOrigin")
     }
 
     // --- Visible in screenshots and recordings ---
@@ -448,6 +482,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(.separator())
         }
 
+        add("Move Band Back Under the Camera", #selector(resetPosition))
         let visible = add("Visible in Screenshots and Recordings", #selector(toggleCapture), key: "v", mods: .option)
         visible.state = capturable ? .on : .off
         menu.addItem(.separator())
