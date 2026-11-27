@@ -81,10 +81,13 @@ and Recordings** switch in the menu. The band says which way it went, and the
 menu bar icon fills in while it is visible. The setting is remembered between
 launches.
 
-Hiding relies on macOS's window sharing setting (`NSWindow.sharingType`).
-macOS screenshots honour it, and so do the recording apps it has been used
-with, but it is up to each capture tool: check once with yours before you
-rely on it.
+Hiding relies on macOS's window sharing setting (`NSWindow.sharingType`),
+and it is up to each capture tool to honour it. Tested on macOS 27 with the
+whole screen captured: macOS screenshots and screen recordings leave the
+band out, and so do apps built on ScreenCaptureKit, the capture API macOS
+has offered since 12.3. Tools still on the older AVFoundation screen
+capture, such as ffmpeg, record it. Check once with yours before you rely
+on it.
 
 ## Scripts
 
